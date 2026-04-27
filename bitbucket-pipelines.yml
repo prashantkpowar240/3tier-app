@@ -1,0 +1,120 @@
+pipelines:
+  default:
+    - step:
+        name: Migration + Validation (Production Ready)
+        image: alpine/git:2.43.0
+
+        clone:
+          enabled: false
+
+        script:
+          - set -euo pipefail
+
+          - echo "🚀 Starting Bitbucket → GitHub Migration..."
+
+          # ===============================
+          # VARIABLES (CHANGE ONLY THIS)
+          # ===============================
+          - export WORKSPACE="prashantkpowar"
+          - export REPO_NAME="3tier-app"
+          - export GITHUB_USER="prashantkpowar240"
+          - export TARGET_REPO="3tier-app"
+
+          - export BB_URL="https://x-token-auth:${BITBUCKET_VARIABLE}@bitbucket.org/${WORKSPACE}/${REPO_NAME}.git"
+          - export GH_URL="https://x-access-token:${GITHUB_VARIABLE}@github.com/${GITHUB_USER}/${TARGET_REPO}.git"
+
+          # ===============================
+          # CLEANUP
+          # ===============================
+          - rm -rf repo.git bb_refs.txt gh_refs.txt bb gh || true
+
+          # ===============================
+          # RETRY FUNCTION
+          # ===============================
+          - |
+            retry() {
+              for i in 1 2 3; do
+                "$@" && return 0
+                echo "⚠️ Retry $i failed, retrying in $((i*5))s..."
+                sleep $((i*5))
+              done
+              echo "❌ Command failed after retries"
+              exit 1
+            }
+
+          # ===============================
+          # STEP 1: MIRROR MIGRATION
+          # ===============================
+          - echo "🔁 Performing mirror migration..."
+
+          - retry git clone --mirror "$BB_URL" repo.git
+          - cd repo.git
+          - retry git push --mirror "$GH_URL"
+          - cd ..
+
+          - echo "✅ Mirror migration completed"
+
+          # ===============================
+          # STEP 2: SHA VALIDATION (NO CLONE)
+          # ===============================
+          - echo "🔍 Validating refs using ls-remote..."
+
+          - git ls-remote "$BB_URL" | sort > bb_refs.txt
+          - git ls-remote "$GH_URL" | sort > gh_refs.txt
+
+          - |
+            if diff bb_refs.txt gh_refs.txt > diff.txt; then
+              echo "✅ SHA VALIDATION PASSED"
+            else
+              echo "❌ SHA VALIDATION FAILED"
+              cat diff.txt
+              exit 1
+            fi
+
+          # ===============================
+          # STEP 3: FILE VALIDATION (CORRECT WAY)
+          # ===============================
+          - echo "📁 Validating tracked files..."
+
+          - retry git clone --depth 1 "$BB_URL" bb
+          - retry git clone --depth 1 "$GH_URL" gh
+
+          - |
+            cd bb && git ls-files | sort > ../bb_files.txt
+            cd ../gh && git ls-files | sort > ../gh_files.txt
+            cd ..
+
+            if diff bb_files.txt gh_files.txt > file_diff.txt; then
+              echo "✅ FILE STRUCTURE MATCHES"
+            else
+              echo "❌ FILE MISMATCH DETECTED"
+              cat file_diff.txt
+              exit 1
+            fi
+
+          # ===============================
+          # STEP 4: BITBUCKET DEPENDENCY CHECK
+          # ===============================
+          - echo "🔗 Checking for Bitbucket references..."
+
+          - |
+            if grep -rE "bitbucket.org|bitbucket\." gh; then
+              echo "⚠️ Bitbucket references found"
+            else
+              echo "✅ No Bitbucket references"
+            fi
+
+          # ===============================
+          # STEP 5: GIT INTEGRITY (BOTH SIDES)
+          # ===============================
+          - echo "🔍 Running git fsck..."
+
+          - git --git-dir=repo.git fsck
+          - cd gh && git fsck && cd ..
+
+          - echo "✅ Git integrity verified"
+
+          # ===============================
+          # FINAL
+          # ===============================
+          - echo "🎉 Migration + Validation SUCCESSFUL"
